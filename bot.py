@@ -18,7 +18,7 @@ from telegram.ext import (
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8445635159:AAHS0zXgHrlffS96oDyjjg0m-y7gF7sfosY"
 DOWNLOAD_DIR = "downloads"
 OUTPUT_DIR   = "outputs"
 
