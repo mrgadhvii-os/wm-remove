@@ -1,3 +1,6 @@
-pyrogram
-tgcrypto
-watermark-remover-cli
+pyrogram==2.0.106
+aiohttp==3.9.1
+PyMuPDF==1.23.8
+Pillow==10.1.0
+cryptg==0.4
+tgcrypto==1.2.5
