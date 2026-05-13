@@ -1,5 +1,3 @@
 pyrogram
-pymupdf
-numpy
-scikit-learn
 tgcrypto
+watermark-remover-cli
