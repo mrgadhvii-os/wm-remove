@@ -400,7 +400,7 @@ async def handle_pdf(client: Client, message: Message):
                 chat_id=message.chat.id,
                 document=f,
                 caption=f"✅ **{document.file_name}**\n━━━━━━━━━━━━━━━━━━━━━\n✨ Watermarks removed successfully!",
-                file_name=f"watermark_free_{document.file_name}"
+                file_name=f"{document.file_name}"
             )
         
         await progress_msg.delete()
