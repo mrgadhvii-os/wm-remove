@@ -5,7 +5,7 @@ import aiohttp
 import random
 import time
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from pathlib import Path
 import fitz
 from PIL import Image
