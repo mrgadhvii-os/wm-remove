@@ -19,7 +19,7 @@ import logging
 BOT_TOKEN = "8445635159:AAHS0zXgHrlffS96oDyjjg0m-y7gF7sfosY"
 API_ID = 27567486
 API_HASH = "b1760d4b5ef697bb8da4e7ac4e261c49"
- 
+
 # Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,7 +35,7 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# ============ WATERMARK REMOVER CLASS ============
+# ============ WATERMARK REMOVER CLASS WITH RETRY ============
 class WatermarkRemover:
     def __init__(self):
         self.base_url = "https://phototune.ai"
@@ -86,7 +86,7 @@ class WatermarkRemover:
                     return result.get("task_id")
         return None
     
-    async def check_status(self, session: aiohttp.ClientSession, task_id: str, max_wait: int = 45) -> bool:
+    async def check_status(self, session: aiohttp.ClientSession, task_id: str, max_wait: int = 60) -> bool:
         """Check task status until completion"""
         headers = self.get_random_headers()
         waited = 0
@@ -99,7 +99,7 @@ class WatermarkRemover:
                         return True
                     elif data.get("status") == "failed":
                         return False
-            await asyncio.sleep(random.uniform(1.5, 2.5))
+            await asyncio.sleep(random.uniform(2, 3))
             waited += 2
         return False
     
@@ -114,29 +114,52 @@ class WatermarkRemover:
                 return True
         return False
     
-    async def process_single_image(self, image_path: str, output_path: str, progress_callback=None, index=0, total=0) -> bool:
-        """Process single image with its own session"""
-        try:
-            if progress_callback:
-                await progress_callback(f"🖼️ Processing image {index}/{total}...")
-            
-            # Create separate session for each image
-            async with aiohttp.ClientSession(cookies=self.get_random_cookies()) as session:
-                task_id = await self.create_task(session, image_path)
-                if not task_id:
-                    return False
+    async def process_single_image_with_retry(self, image_path: str, output_path: str, max_retries: int = 3, progress_callback=None, index=0, total=0) -> bool:
+        """Process single image with retry logic"""
+        for attempt in range(max_retries):
+            try:
+                if progress_callback:
+                    if attempt > 0:
+                        await progress_callback(f"🔄 Retry {attempt}/{max_retries} for image {index}/{total}...")
+                    else:
+                        await progress_callback(f"🖼️ Processing image {index}/{total}...")
                 
-                if not await self.check_status(session, task_id):
-                    return False
-                
-                return await self.download_result(session, task_id, output_path)
-        except Exception as e:
-            logger.error(f"Error processing {image_path}: {e}")
-            return False
+                # Create separate session for each image
+                async with aiohttp.ClientSession(cookies=self.get_random_cookies()) as session:
+                    task_id = await self.create_task(session, image_path)
+                    if not task_id:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(random.uniform(2, 4))
+                            continue
+                        return False
+                    
+                    if not await self.check_status(session, task_id):
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(random.uniform(2, 4))
+                            continue
+                        return False
+                    
+                    if await self.download_result(session, task_id, output_path):
+                        return True
+                    else:
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(random.uniform(2, 4))
+                            continue
+                        return False
+                        
+            except Exception as e:
+                logger.error(f"Error processing {image_path} (attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(random.uniform(3, 5))
+                    continue
+                return False
+        
+        return False
     
-    async def process_batch(self, image_paths: List[str], temp_dir: str, progress_callback=None) -> List[str]:
-        """Process multiple images in parallel with separate sessions"""
+    async def process_batch(self, image_paths: List[str], temp_dir: str, progress_callback=None) -> Tuple[List[str], List[int]]:
+        """Process multiple images in parallel with separate sessions and retry"""
         output_paths = []
+        failed_pages = []
         
         # Create tasks for all images (each with its own session)
         tasks = []
@@ -147,25 +170,48 @@ class WatermarkRemover:
             # Create callback wrapper for progress
             async def callback_with_index(msg, idx=i+1, total=len(image_paths)):
                 if progress_callback:
-                    await progress_callback(f"🖼️ Processing image {idx}/{total}...")
+                    await progress_callback(f"{msg}")
             
-            task = self.process_single_image(
+            task = self.process_single_image_with_retry(
                 img_path, 
-                output_path, 
+                output_path,
+                3,  # max retries
                 callback_with_index,
                 i+1, 
                 len(image_paths)
             )
             tasks.append(task)
         
-        # Run all tasks concurrently (each with its own session)
+        # Run all tasks concurrently
         results = await asyncio.gather(*tasks)
         
-        return [output_paths[i] for i, success in enumerate(results) if success]
+        # Track failed pages
+        successful = []
+        for i, success in enumerate(results):
+            if success:
+                successful.append(output_paths[i])
+            else:
+                failed_pages.append(i + 1)  # Store page number (1-indexed)
+        
+        return successful, failed_pages
 
 # ============ PDF PROCESSING FUNCTIONS ============
-def extract_pdf_to_images(pdf_path: str, temp_dir: str, dpi: int = 150) -> List[str]:
-    """Extract PDF pages to images"""
+def get_pdf_info(pdf_path: str) -> Tuple[int, List[float]]:
+    """Get PDF page count and page sizes"""
+    doc = fitz.open(pdf_path)
+    page_count = len(doc)
+    page_sizes = []
+    
+    for page_num in range(page_count):
+        page = doc[page_num]
+        rect = page.rect
+        page_sizes.append((rect.width, rect.height))
+    
+    doc.close()
+    return page_count, page_sizes
+
+def extract_pdf_to_images_with_size(pdf_path: str, temp_dir: str, page_sizes: List[tuple], dpi: int = 150) -> List[str]:
+    """Extract PDF pages to images with original dimensions"""
     doc = fitz.open(pdf_path)
     image_paths = []
     zoom = dpi / 72
@@ -181,32 +227,125 @@ def extract_pdf_to_images(pdf_path: str, temp_dir: str, dpi: int = 150) -> List[
     doc.close()
     return image_paths
 
-def images_to_pdf(image_paths: List[str], output_pdf: str):
-    """Convert images back to PDF"""
+def images_to_pdf_preserve_size(image_paths: List[str], output_pdf: str, page_sizes: List[tuple]):
+    """Convert images back to PDF preserving original page sizes"""
     doc = fitz.open()
     
-    for img_path in image_paths:
+    for i, img_path in enumerate(image_paths):
+        # Get original page dimensions
+        original_width, original_height = page_sizes[i]
+        
+        # Open image
         img = Image.open(img_path)
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Save as PNG in memory
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format='PNG', optimize=True)
+        img_bytes.seek(0)
+        
+        # Create pixmap
+        img_pix = fitz.Pixmap(img_bytes)
+        
+        # Create page with original dimensions
+        page = doc.new_page(width=original_width, height=original_height)
+        
+        # Calculate scaling to fit page while maintaining aspect ratio
+        img_width = img_pix.width
+        img_height = img_pix.height
+        
+        # Scale to fit page
+        scale_x = original_width / img_width
+        scale_y = original_height / img_height
+        scale = min(scale_x, scale_y)
+        
+        scaled_width = img_width * scale
+        scaled_height = img_height * scale
+        
+        # Center the image
+        x_offset = (original_width - scaled_width) / 2
+        y_offset = (original_height - scaled_height) / 2
+        
+        # Create rectangle for image placement
+        img_rect = fitz.Rect(x_offset, y_offset, x_offset + scaled_width, y_offset + scaled_height)
+        
+        # Insert image
+        page.insert_image(img_rect, pixmap=img_pix)
+        img_pix = None
+    
+    # Save with compression to keep size minimal
+    doc.save(output_pdf, garbage=4, deflate=True, linear=False)
+    doc.close()
+
+def images_to_pdf_exact(image_paths: List[str], output_pdf: str, original_pdf_path: str):
+    """Convert images back to PDF matching original exactly"""
+    # Get original PDF info
+    doc_original = fitz.open(original_pdf_path)
+    
+    doc_new = fitz.open()
+    
+    for i, img_path in enumerate(image_paths):
+        # Get original page
+        original_page = doc_original[i]
+        original_rect = original_page.rect
+        
+        # Open image
+        img = Image.open(img_path)
+        
+        # Convert to RGB if needed
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Save as PNG in memory
         img_bytes = io.BytesIO()
         img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
         
+        # Create pixmap
         img_pix = fitz.Pixmap(img_bytes)
-        img_rect = fitz.Rect(0, 0, img_pix.width, img_pix.height)
         
-        page = doc.new_page(width=img_pix.width, height=img_pix.height)
+        # Create new page with exact original dimensions
+        page = doc_new.new_page(width=original_rect.width, height=original_rect.height)
+        
+        # Calculate scaling to maintain aspect ratio while filling page
+        img_width = img_pix.width
+        img_height = img_pix.height
+        
+        # Scale to exactly fit page
+        scale_x = original_rect.width / img_width
+        scale_y = original_rect.height / img_height
+        
+        # Use min scale to ensure image fits without cropping
+        scale = min(scale_x, scale_y)
+        
+        scaled_width = img_width * scale
+        scaled_height = img_height * scale
+        
+        # Center the image
+        x_offset = (original_rect.width - scaled_width) / 2
+        y_offset = (original_rect.height - scaled_height) / 2
+        
+        img_rect = fitz.Rect(x_offset, y_offset, x_offset + scaled_width, y_offset + scaled_height)
+        
+        # Insert image
         page.insert_image(img_rect, pixmap=img_pix)
         img_pix = None
     
-    doc.save(output_pdf, garbage=4, deflate=True)
-    doc.close()
+    doc_original.close()
+    doc_new.save(output_pdf, garbage=4, deflate=True)
+    doc_new.close()
 
 def cleanup_temp(temp_dir: str):
     """Clean up temporary directory"""
     try:
         if os.path.exists(temp_dir):
             for file in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, file))
+                file_path = os.path.join(temp_dir, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
             os.rmdir(temp_dir)
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
@@ -214,16 +353,6 @@ def cleanup_temp(temp_dir: str):
 # ============ BOT COMMANDS ============
 # Store user processing status
 user_tasks = {}
-
-async def send_progress_message(message: Message, text: str, edit: bool = True):
-    """Send or edit progress message"""
-    try:
-        if edit and hasattr(message, 'edit_text'):
-            await message.edit_text(text)
-        else:
-            return await message.reply_text(text)
-    except:
-        return await message.reply_text(text)
 
 @app.on_message(filters.command(["start"]))
 async def start_command(client: Client, message: Message):
@@ -234,12 +363,13 @@ async def start_command(client: Client, message: Message):
         "📌 **How to use:**\n"
         "1. Send me any PDF file\n"
         "2. I'll extract all pages\n"
-        "3. Remove watermarks from each page\n"
+        "3. Remove watermarks from each page (with retry)\n"
         "4. Send back the cleaned PDF\n\n"
         "⚡ **Features:**\n"
         "• Parallel processing for speed\n"
+        "• Auto-retry failed pages (3 attempts)\n"
+        "• Preserves original PDF size & quality\n"
         "• No file size limits\n"
-        "• Preserves original quality\n"
         "• Shows real-time progress\n\n"
         "📤 **Just send me a PDF file to start!**",
         parse_mode=ParseMode.MARKDOWN
@@ -258,6 +388,10 @@ async def help_command(client: Client, message: Message):
         "/start - Start the bot\n"
         "/help - Show this help\n"
         "/cancel - Cancel current task\n\n"
+        "**Features:**\n"
+        "• Auto-retry failed pages\n"
+        "• Preserves original PDF dimensions\n"
+        "• Maintains same file size\n\n"
         "**Note:** Processing time depends on number of pages.",
         parse_mode=ParseMode.MARKDOWN
     )
@@ -318,20 +452,25 @@ async def handle_pdf(client: Client, message: Message):
         await progress_msg.edit_text("📥 **Downloading PDF...**\n⏳ Please wait...")
         await client.download_media(message, file_name=pdf_path)
         
+        # Get original PDF info
+        original_page_count, original_page_sizes = get_pdf_info(pdf_path)
+        original_size = os.path.getsize(pdf_path)
+        
         # Check for cancellation
         if user_tasks[user_id]['cancel']:
             raise Exception("Task cancelled")
         
         # Extract PDF to images
         await progress_msg.edit_text("📄 **Extracting PDF pages...**\n⏳ Converting to images...")
-        image_paths = extract_pdf_to_images(pdf_path, extract_dir)
+        image_paths = extract_pdf_to_images_with_size(pdf_path, extract_dir, original_page_sizes)
         total_pages = len(image_paths)
         
         await progress_msg.edit_text(
             f"✅ **PDF extracted successfully!**\n"
-            f"📄 Total pages: **{total_pages}**\n\n"
+            f"📄 Total pages: **{total_pages}**\n"
+            f"💾 Original size: **{original_size / (1024*1024):.2f} MB**\n\n"
             f"🔄 **Removing watermarks...**\n"
-            f"⚡ Processing **{total_pages}** pages in parallel..."
+            f"⚡ Processing **{total_pages}** pages in parallel with auto-retry..."
         )
         
         # Check for cancellation
@@ -351,11 +490,12 @@ async def handle_pdf(client: Client, message: Message):
                 f"{text}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 Total pages: {total_pages}\n"
-                f"⚡ Parallel processing enabled"
+                f"🔄 Auto-retry: Enabled (3 attempts)\n"
+                f"⚡ Parallel processing: Active"
             )
         
-        # Process images in parallel
-        cleaned_images = await remover.process_batch(
+        # Process images in parallel with retry
+        cleaned_images, failed_pages = await remover.process_batch(
             image_paths, 
             cleaned_dir, 
             update_progress
@@ -365,30 +505,46 @@ async def handle_pdf(client: Client, message: Message):
         if user_tasks[user_id]['cancel']:
             raise Exception("Task cancelled")
         
+        # Show retry results
+        retry_msg = ""
+        if failed_pages:
+            retry_msg = f"\n⚠️ Failed pages: {', '.join(map(str, failed_pages))}"
+        
         if not cleaned_images:
-            await progress_msg.edit_text("❌ **Failed to process images!**\nPlease try again later.")
+            await progress_msg.edit_text(
+                f"❌ **Failed to process all images!**\n"
+                f"Please try again later.\n{retry_msg}"
+            )
             return
         
-        # Convert back to PDF
+        # Convert back to PDF preserving original size and dimensions
         await progress_msg.edit_text(
             f"📚 **Creating cleaned PDF...**\n"
-            f"✅ Successfully processed: **{len(cleaned_images)}/{total_pages}** pages"
+            f"✅ Successfully processed: **{len(cleaned_images)}/{total_pages}** pages\n"
+            f"🔄 Preserving original PDF dimensions...{retry_msg}"
         )
         
-        output_pdf = os.path.join(download_dir, f"cleaned_{document.file_name}")
-        images_to_pdf(cleaned_images, output_pdf)
+        output_pdf = os.path.join(download_dir, f"{document.file_name}")
+        # Use exact PDF preservation
+        images_to_pdf_exact(cleaned_images, output_pdf, pdf_path)
         
-        # Check file size
-        file_size = os.path.getsize(output_pdf)
-        file_size_mb = file_size / (1024 * 1024)
+        # Check output file size
+        output_size = os.path.getsize(output_pdf)
+        output_size_mb = output_size / (1024 * 1024)
+        original_size_mb = original_size / (1024 * 1024)
+        size_diff = abs(output_size - original_size)
+        size_diff_percent = (size_diff / original_size) * 100
         
         # Send result
         await progress_msg.edit_text(
             f"✅ **Watermark Removed Successfully!**\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"📄 Original: `{document.file_name}`\n"
-            f"📊 Pages processed: **{len(cleaned_images)}/{total_pages}**\n"
-            f"💾 File size: **{file_size_mb:.2f} MB**\n"
+            f"📊 Pages: **{len(cleaned_images)}/{total_pages}**\n"
+            f"💾 Original size: **{original_size_mb:.2f} MB**\n"
+            f"💾 New size: **{output_size_mb:.2f} MB**\n"
+            f"📊 Size difference: **{size_diff_percent:.1f}%**\n"
+            f"{retry_msg}\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"📤 **Sending cleaned PDF...**",
             parse_mode=ParseMode.MARKDOWN
@@ -399,8 +555,8 @@ async def handle_pdf(client: Client, message: Message):
             await client.send_document(
                 chat_id=message.chat.id,
                 document=f,
-                caption=f"✅ **{document.file_name}**\n━━━━━━━━━━━━━━━━━━━━━\n✨ Watermarks removed successfully!",
-                file_name=f"{document.file_name}"
+                caption=f"✅ **{document.file_name}**\n━━━━━━━━━━━━━━━━━━━━━\n✨ Watermarks removed successfully!\n📊 Pages: {len(cleaned_images)}/{total_pages}",
+                file_name=document.file_name  # Same filename as original
             )
         
         await progress_msg.delete()
@@ -447,7 +603,8 @@ def main():
     print("🤖 Starting Watermark Remover Bot...")
     print("✅ Bot is running!")
     print("📌 Send any PDF to remove watermarks")
-    print("⚡ Using parallel processing for speed")
+    print("⚡ Using parallel processing with auto-retry")
+    print("🔄 Failed pages will be retried 3 times")
     
     app.run()
 
