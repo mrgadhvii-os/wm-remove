@@ -204,20 +204,16 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-async def progress_callback(current, total, message, start_time):
+async def progress_callback(current, total, message, status_text):
     """Show upload/download progress"""
-    if total > MAX_FILE_SIZE:
-        return
-    
-    percent = (current * 100) // total
-    if percent % 10 == 0:  # Update every 10%
-        try:
-            await message.edit_text(
-                f"📥 Downloading: {percent}%\n"
-                f"📦 Size: {current // (1024*1024)}MB / {total // (1024*1024)}MB"
-            )
-        except:
-            pass
+    percent = (current * 100) // total if total > 0 else 0
+    try:
+        await message.edit_text(
+            f"{status_text}: {percent}%\n"
+            f"📦 {current // (1024*1024)}MB / {total // (1024*1024)}MB"
+        )
+    except:
+        pass
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
@@ -236,9 +232,15 @@ async def start_command(client: Client, message: Message):
 async def help_command(client: Client, message: Message):
     await start_command(client, message)
 
-@app.on_message(filters.document & filters.document.file_name.endswith(".pdf"))
+# FIXED: Correct filter syntax for PDF files
+@app.on_message(filters.document)
 async def handle_pdf(client: Client, message: Message):
     doc = message.document
+    
+    # Check if it's a PDF
+    if not doc.file_name or not doc.file_name.lower().endswith(".pdf"):
+        await message.reply_text("❌ Please send a **PDF** file only.\n\nOther formats are not supported.")
+        return
     
     # Check file size
     if doc.file_size > MAX_FILE_SIZE:
@@ -270,7 +272,7 @@ async def handle_pdf(client: Client, message: Message):
             message,
             file_name=in_path,
             progress=lambda c, t: asyncio.create_task(
-                progress_callback(c, t, status_msg, asyncio.get_event_loop().time())
+                progress_callback(c, t, status_msg, "📥 Downloading")
             )
         )
         
@@ -310,7 +312,7 @@ async def handle_pdf(client: Client, message: Message):
             caption="🔓 **Watermark-free PDF** (original content intact)",
             parse_mode=ParseMode.MARKDOWN,
             progress=lambda c, t: asyncio.create_task(
-                progress_callback(c, t, status_msg, asyncio.get_event_loop().time())
+                progress_callback(c, t, status_msg, "📤 Uploading")
             )
         )
         
@@ -332,15 +334,23 @@ async def handle_pdf(client: Client, message: Message):
             except Exception:
                 pass
 
-@app.on_message(filters.document)
-async def handle_other_files(client: Client, message: Message):
-    await message.reply_text("❌ Please send a **PDF** file only.\n\nOther formats are not supported.")
-
 @app.on_message(filters.command("stats"))
 async def stats_command(client: Client, message: Message):
     # Get directory sizes
-    download_size = sum(os.path.getsize(os.path.join(DOWNLOAD_DIR, f)) for f in os.listdir(DOWNLOAD_DIR) if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))) if os.path.exists(DOWNLOAD_DIR) else 0
-    output_size = sum(os.path.getsize(os.path.join(OUTPUT_DIR, f)) for f in os.listdir(OUTPUT_DIR) if os.path.isfile(os.path.join(OUTPUT_DIR, f))) if os.path.exists(OUTPUT_DIR) else 0
+    download_size = 0
+    output_size = 0
+    
+    if os.path.exists(DOWNLOAD_DIR):
+        for f in os.listdir(DOWNLOAD_DIR):
+            f_path = os.path.join(DOWNLOAD_DIR, f)
+            if os.path.isfile(f_path):
+                download_size += os.path.getsize(f_path)
+    
+    if os.path.exists(OUTPUT_DIR):
+        for f in os.listdir(OUTPUT_DIR):
+            f_path = os.path.join(OUTPUT_DIR, f)
+            if os.path.isfile(f_path):
+                output_size += os.path.getsize(f_path)
     
     await message.reply_text(
         f"📊 **Bot Statistics**\n\n"
