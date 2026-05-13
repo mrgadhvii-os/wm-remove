@@ -22,8 +22,10 @@ def remove_watermark(input_path: str, output_path: str) -> int:
     for page_num in range(len(doc)):
         page = doc[page_num]
         rects = []
+        email_found = False
+        phone_found = False
         
-        # Get all text with spans for opacity info
+        # Get all text with spans
         try:
             rawdict = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
             for block in rawdict.get("blocks", []):
@@ -32,81 +34,56 @@ def remove_watermark(input_path: str, output_path: str) -> int:
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
                         txt = span.get("text", "").strip()
-                        opacity = span.get("opacity", 1.0)
-                        font_size = span.get("size", 12)
                         
                         if not txt:
                             continue
                         
-                        # Target specific email - remove regardless of opacity
-                        if target_email in txt:
+                        # Target specific email - remove only if not already found on this page
+                        if target_email in txt and not email_found:
                             rects.append(fitz.Rect(span["bbox"]))
+                            email_found = True
                             continue
                         
-                        # Target 10-digit phone numbers - remove regardless of opacity  
+                        # Target 10-digit phone number - remove only if not already found on this page
                         phone_match = re.search(r'\d{10}', txt.replace(" ", ""))
-                        if phone_match:
+                        if phone_match and not phone_found:
                             rects.append(fitz.Rect(span["bbox"]))
-                            continue
-                        
-                        # For other content: ONLY remove if opacity < 0.95 (watermark)
-                        # AND font size is typical for watermark (small or large)
-                        if opacity < 0.95:
-                            # Check if it looks like watermark (email/phone/small text)
-                            is_email = bool(re.search(r'@', txt))
-                            is_phone = bool(re.search(r'\d{3,}', txt))
-                            is_watermark_text = is_email or is_phone or len(txt) < 50
-                            
-                            if is_watermark_text:
-                                rects.append(fitz.Rect(span["bbox"]))
-                                continue
-                        
-                        # Also check text that appears to be contact info
-                        contact_match = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}', txt)
-                        if contact_match and opacity < 0.95:
-                            rects.append(fitz.Rect(span["bbox"]))
-                            continue
-                            
-                        phone_any = re.search(r'\d{10}', txt.replace(" ", ""))
-                        if phone_any and opacity < 0.95:
-                            rects.append(fitz.Rect(span["bbox"]))
+                            phone_found = True
                             continue
                             
         except Exception as e:
-            print(f"Error processing spans: {e}")
+            print(f"Error: {e}")
         
-        # Word level detection for exact matches
-        try:
-            words = page.get_text("words")
-            for w in words:
-                word = w[4].strip()
-                if target_email in word:
-                    rects.append(fitz.Rect(w[:4]))
-                if re.search(r'\d{10}', word.replace(" ", "")):
-                    rects.append(fitz.Rect(w[:4]))
-        except Exception:
-            pass
-        
-        # Remove duplicates and apply transparent redaction
-        seen = set()
-        for rect in rects:
-            key = (round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
-            if key in seen:
-                continue
-            seen.add(key)
+        # Word level detection as backup
+        if not email_found or not phone_found:
             try:
-                # NO WHITE FILL - use transparent redaction
-                page.add_redact_annot(rect, fill=(0, 0, 0, 0))  # Transparent
+                words = page.get_text("words")
+                for w in words:
+                    word = w[4].strip()
+                    if target_email in word and not email_found:
+                        rects.append(fitz.Rect(w[:4]))
+                        email_found = True
+                    if re.search(r'\d{10}', word.replace(" ", "")) and not phone_found:
+                        rects.append(fitz.Rect(w[:4]))
+                        phone_found = True
+            except Exception:
+                pass
+        
+        # Apply redaction WITHOUT any fill - just remove the text
+        for rect in rects:
+            try:
+                # CRITICAL: Use None as fill to remove text without adding white box
+                page.add_redact_annot(rect, fill=None, text="")
                 total += 1
             except Exception:
                 pass
         
-        if seen:
-            # Apply redactions without affecting images/graphics
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=1)
+        if rects:
+            # Apply redactions - this removes the text completely
+            page.apply_redactions()
     
-    # Save with compression but preserve quality
-    doc.save(output_path, garbage=4, deflate=True, clean=True)
+    # Save without any extra processing
+    doc.save(output_path, garbage=4, deflate=True)
     doc.close()
     return total
 
@@ -115,11 +92,12 @@ async def start(client: Client, message: Message):
     await message.reply_text(
         "📄 **Watermark Remover Bot**\n\n"
         "• Send me PDF files\n"
-        "• I'll remove watermarks (email/phone numbers)\n"
-        "• Semi-transparent text will be removed\n"
-        "• Solid content (opacity 1) will be preserved\n"
-        "• No white boxes will appear\n\n"
-        "Just send the PDF and get cleaned version back!"
+        "• I'll remove SPECIFICALLY:\n"
+        "  - tyagimansi1103@gmail.com\n"
+        "  - 10-digit phone numbers\n"
+        "• Maximum 2 removals per page\n"
+        "• NO white boxes will appear\n\n"
+        "Just send the PDF!"
     )
 
 @app.on_message(filters.document)
@@ -131,22 +109,19 @@ async def handle_pdf(client: Client, message: Message):
     msg = await message.reply_text("📥 **Processing your PDF...**")
     
     try:
-        # Download
         file_path = await message.download(file_name=os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{message.id}.pdf"))
-        await msg.edit_text("🔍 **Removing watermarks...**\n• Target: Email & Phone numbers\n• Opacity < 0.95 will be removed")
+        await msg.edit_text("🔍 **Removing watermarks...**\n• Target: tyagimansi1103@gmail.com\n• Target: 10-digit phone numbers\n• Max 2 per page")
         
-        # Process
         output_path = os.path.join(OUTPUT_DIR, f"{message.from_user.id}_{message.id}_cleaned.pdf")
         loop = asyncio.get_event_loop()
         removed = await loop.run_in_executor(None, remove_watermark, file_path, output_path)
         
-        # Send back
         await msg.edit_text(f"✅ **Done!** Removed {removed} watermarks\n📤 Sending cleaned PDF...")
         
         await client.send_document(
             message.chat.id,
             output_path,
-            caption=f"✨ **Cleaned PDF**\n• Removed: {removed} watermarks\n• Target: tyagimansi1103@gmail.com & phone numbers\n• No white boxes added",
+            caption=f"✨ **Cleaned PDF**\n• Removed: {removed} watermarks\n• NO white boxes added\n• Only target email and phone number removed",
             file_name=message.document.file_name.replace('.pdf', '_cleaned.pdf')
         )
         
@@ -162,10 +137,10 @@ async def handle_pdf(client: Client, message: Message):
             except:
                 pass
 
-print("🤖 Bot Started - No white boxes, watermark removal only!")
-print("✓ Opacity < 0.95 will be removed")
-print("✓ Email & phone numbers will be removed")
-print("✓ Solid content (opacity = 1) preserved")
-print("✓ Transparent fill (no white boxes)")
+print("🤖 Bot Started - NO WHITE BOXES!")
+print("✓ Only removing: tyagimansi1103@gmail.com")
+print("✓ Only removing: 10-digit phone numbers")
+print("✓ Max 2 watermarks per page")
+print("✓ Using fill=None - no white rectangles")
 
 app.run()
