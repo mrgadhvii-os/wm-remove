@@ -10,10 +10,11 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode
 
-# ── Config ─────────────────────────────────────────────────────────────
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ── Config ────────────────────────────────────────────────────────────────────
+API_ID = int(os.environ.get("API_ID", "27567486"))
+API_HASH = os.environ.get("API_HASH", "b1760d4b5ef697bb8da4e7ac4e261c49")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8445635159:AAHS0zXgHrlffS96oDyjjg0m-y7gF7sfosY")
+
 
 DOWNLOAD_DIR = "downloads"
 OUTPUT_DIR = "outputs"
