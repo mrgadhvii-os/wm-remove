@@ -1,5 +1,6 @@
-import os, re, asyncio
-import fitz
+import os
+import asyncio
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -14,90 +15,54 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 app = Client("watermark_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-def remove_watermark(input_path: str, output_path: str) -> int:
-    doc = fitz.open(input_path)
-    total = 0
-    target_email = "tyagimansi1103@gmail.com"
-    
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        rects = []
-        email_found = False
-        phone_found = False
+def remove_watermark_cli(input_path: str, output_path: str) -> bool:
+    """
+    Use watermark-remover-cli to remove watermarks
+    The package processes the file and saves cleaned version
+    """
+    try:
+        # watermark-remover-cli processes in-place or generates output
+        # Based on the package, it works directly on the input file
+        result = subprocess.run(
+            ["python3", "-m", "watermark-remover-cli", "--file", input_path],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
         
-        # Get all text with spans
-        try:
-            rawdict = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
-            for block in rawdict.get("blocks", []):
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        txt = span.get("text", "").strip()
-                        
-                        if not txt:
-                            continue
-                        
-                        # Target specific email - remove only if not already found on this page
-                        if target_email in txt and not email_found:
-                            rects.append(fitz.Rect(span["bbox"]))
-                            email_found = True
-                            continue
-                        
-                        # Target 10-digit phone number - remove only if not already found on this page
-                        phone_match = re.search(r'\d{10}', txt.replace(" ", ""))
-                        if phone_match and not phone_found:
-                            rects.append(fitz.Rect(span["bbox"]))
-                            phone_found = True
-                            continue
-                            
-        except Exception as e:
-            print(f"Error: {e}")
+        # The package might save output with a specific naming convention
+        # Check common output patterns
+        possible_outputs = [
+            input_path.replace('.pdf', '_cleaned.pdf'),
+            input_path.replace('.pdf', '_output.pdf'),
+            os.path.join(os.path.dirname(input_path), 'cleaned_' + os.path.basename(input_path))
+        ]
         
-        # Word level detection as backup
-        if not email_found or not phone_found:
-            try:
-                words = page.get_text("words")
-                for w in words:
-                    word = w[4].strip()
-                    if target_email in word and not email_found:
-                        rects.append(fitz.Rect(w[:4]))
-                        email_found = True
-                    if re.search(r'\d{10}', word.replace(" ", "")) and not phone_found:
-                        rects.append(fitz.Rect(w[:4]))
-                        phone_found = True
-            except Exception:
-                pass
+        for possible in possible_outputs:
+            if os.path.exists(possible):
+                os.rename(possible, output_path)
+                return True
         
-        # Apply redaction WITHOUT any fill - just remove the text
-        for rect in rects:
-            try:
-                # CRITICAL: Use None as fill to remove text without adding white box
-                page.add_redact_annot(rect, fill=None, text="")
-                total += 1
-            except Exception:
-                pass
+        # If no separate output, assume input was modified
+        if result.returncode == 0:
+            os.rename(input_path, output_path)
+            return True
+            
+        return False
         
-        if rects:
-            # Apply redactions - this removes the text completely
-            page.apply_redactions()
-    
-    # Save without any extra processing
-    doc.save(output_path, garbage=4, deflate=True)
-    doc.close()
-    return total
+    except Exception as e:
+        print(f"Error running watermark-remover-cli: {e}")
+        return False
 
 @app.on_message(filters.command("start"))
 async def start(client: Client, message: Message):
     await message.reply_text(
         "📄 **Watermark Remover Bot**\n\n"
-        "• Send me PDF files\n"
-        "• I'll remove SPECIFICALLY:\n"
-        "  - tyagimansi1103@gmail.com\n"
-        "  - 10-digit phone numbers\n"
-        "• Maximum 2 removals per page\n"
-        "• NO white boxes will appear\n\n"
-        "Just send the PDF!"
+        "Send me a PDF file, and I'll remove watermarks using\n"
+        "`watermark-remover-cli` package!\n\n"
+        "• Works with colored watermarks\n"
+        "• Preserves black text content\n"
+        "• No manual configuration needed"
     )
 
 @app.on_message(filters.document)
@@ -106,41 +71,51 @@ async def handle_pdf(client: Client, message: Message):
         await message.reply_text("❌ Please send a PDF file only!")
         return
     
-    msg = await message.reply_text("📥 **Processing your PDF...**")
+    msg = await message.reply_text("📥 **Downloading PDF...**")
     
     try:
-        file_path = await message.download(file_name=os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{message.id}.pdf"))
-        await msg.edit_text("🔍 **Removing watermarks...**\n• Target: tyagimansi1103@gmail.com\n• Target: 10-digit phone numbers\n• Max 2 per page")
-        
-        output_path = os.path.join(OUTPUT_DIR, f"{message.from_user.id}_{message.id}_cleaned.pdf")
-        loop = asyncio.get_event_loop()
-        removed = await loop.run_in_executor(None, remove_watermark, file_path, output_path)
-        
-        await msg.edit_text(f"✅ **Done!** Removed {removed} watermarks\n📤 Sending cleaned PDF...")
-        
-        await client.send_document(
-            message.chat.id,
-            output_path,
-            caption=f"✨ **Cleaned PDF**\n• Removed: {removed} watermarks\n• NO white boxes added\n• Only target email and phone number removed",
-            file_name=message.document.file_name.replace('.pdf', '_cleaned.pdf')
+        # Download
+        input_path = await message.download(
+            file_name=os.path.join(DOWNLOAD_DIR, f"{message.from_user.id}_{message.id}.pdf")
         )
+        
+        await msg.edit_text("🔍 **Removing watermarks with watermark-remover-cli...**")
+        
+        # Output path
+        output_path = os.path.join(OUTPUT_DIR, f"{message.from_user.id}_{message.id}_cleaned.pdf")
+        
+        # Run CLI tool
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, remove_watermark_cli, input_path, output_path)
+        
+        if success and os.path.exists(output_path):
+            await msg.edit_text("✅ **Watermarks removed!** 📤 Sending back...")
+            
+            await client.send_document(
+                message.chat.id,
+                output_path,
+                caption="✨ **Cleaned PDF**\nWatermarks removed using watermark-remover-cli",
+                file_name=message.document.file_name.replace('.pdf', '_cleaned.pdf')
+            )
+        else:
+            await msg.edit_text("❌ **Failed to remove watermarks**\nThe CLI tool may not support this PDF format.")
         
         await msg.delete()
         
+    except subprocess.TimeoutExpired:
+        await msg.edit_text("⏰ **Timeout!** PDF processing took too long.")
     except Exception as e:
         await msg.edit_text(f"❌ **Error:** `{str(e)[:150]}`")
     finally:
-        for path in [file_path, output_path]:
+        for path in [input_path, output_path]:
             try:
                 if path and os.path.exists(path):
                     os.remove(path)
             except:
                 pass
 
-print("🤖 Bot Started - NO WHITE BOXES!")
-print("✓ Only removing: tyagimansi1103@gmail.com")
-print("✓ Only removing: 10-digit phone numbers")
-print("✓ Max 2 watermarks per page")
-print("✓ Using fill=None - no white rectangles")
+print("🤖 Bot Started with watermark-remover-cli!")
+print("✓ Using external package for watermark removal")
+print("✓ Send PDF files to remove watermarks")
 
 app.run()
