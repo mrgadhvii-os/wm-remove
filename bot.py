@@ -26,7 +26,6 @@ def remove_watermark(input_path: str, output_path: str) -> int:
     for page in doc:
         rects = []
         
-        # Get text with opacity info
         try:
             rawdict = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
             for block in rawdict.get("blocks", []):
@@ -40,26 +39,20 @@ def remove_watermark(input_path: str, output_path: str) -> int:
                         if not txt:
                             continue
                         
-                        # Target specific email
                         if target_email in txt:
                             rects.append(fitz.Rect(span["bbox"]) + (-2, -2, 2, 2))
                             continue
                         
-                        # Target 10-digit phone numbers
                         phone_match = re.search(target_phone_pattern, txt.replace(" ", ""))
                         if phone_match:
-                            phone_num = phone_match.group()
-                            # Only remove if it's the specific number pattern (will be detected)
                             rects.append(fitz.Rect(span["bbox"]) + (-2, -2, 2, 2))
                             continue
                         
-                        # Generic email pattern with opacity check
                         email_match = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}', txt)
                         if email_match and opacity < 0.5:
                             rects.append(fitz.Rect(span["bbox"]) + (-2, -2, 2, 2))
                             continue
                         
-                        # Generic phone pattern with opacity check  
                         phone_any = re.search(r'\d{10}', txt.replace(" ", ""))
                         if phone_any and opacity < 0.5:
                             rects.append(fitz.Rect(span["bbox"]) + (-2, -2, 2, 2))
@@ -67,7 +60,6 @@ def remove_watermark(input_path: str, output_path: str) -> int:
         except Exception:
             pass
         
-        # Word level detection for exact matches
         try:
             for w in page.get_text("words"):
                 word = w[4].strip()
@@ -101,8 +93,12 @@ def remove_watermark(input_path: str, output_path: str) -> int:
 async def start(client: Client, message: Message):
     await message.reply_text("📄 Send me PDF files, I'll remove watermarks (email/phone) and send them back!")
 
-@app.on_message(filters.document & filters.pdf)
+@app.on_message(filters.document)
 async def handle_pdf(client: Client, message: Message):
+    if not message.document.file_name.lower().endswith('.pdf'):
+        await message.reply_text("❌ Please send a PDF file only!")
+        return
+    
     user_id = message.from_user.id
     msg = await message.reply_text("⏳ Downloading PDF...")
     
