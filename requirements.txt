@@ -1,5 +1,5 @@
-python-telegram-bot
-PyMuPDF
-scikit-learn
+pyrogram
+pymupdf
 numpy
-Pillow
+scikit-learn
+tgcrypto
