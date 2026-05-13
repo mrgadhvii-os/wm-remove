@@ -1,2 +1,5 @@
-python-telegram-bot==21.9
-pymupdf
+python-telegram-bot
+PyMuPDF
+scikit-learn
+numpy
+Pillow
